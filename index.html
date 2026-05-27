@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reef | Chennai Tech Community Tracker</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.css"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a0a0a;
+        --surface: #111111;
+        --surface-raised: #171717;
+        --line: #262626;
+        --muted: #a3a3a3;
+        --text: #f5f5f5;
+        --amber: #f59e0b;
+        --amber-soft: rgba(245, 158, 11, 0.14);
+        --danger: #fb7185;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Geist Sans", Arial, sans-serif;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 248px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      .sidebar {
+        border-right: 1px solid var(--line);
+        background: #0d0d0d;
+        padding: 28px 22px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+      }
+
+      .brand {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 34px;
+      }
+
+      .brand-mark {
+        width: 38px;
+        height: 38px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(245, 158, 11, 0.45);
+        background: var(--amber-soft);
+        color: var(--amber);
+        border-radius: 8px;
+        font-weight: 800;
+      }
+
+      .brand h1 {
+        margin: 8px 0 0;
+        font-size: 28px;
+        line-height: 1;
+        letter-spacing: 0;
+      }
+
+      .brand p,
+      .status-note,
+      .card-meta,
+      .empty,
+      .action-list {
+        color: var(--muted);
+      }
+
+      .brand p {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .nav {
+        display: grid;
+        gap: 8px;
+      }
+
+      .nav a {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 40px;
+        padding: 0 12px;
+        border-radius: 8px;
+        color: #d4d4d4;
+        border: 1px solid transparent;
+      }
+
+      .nav a:hover {
+        color: var(--text);
+        background: var(--surface);
+        border-color: var(--line);
+      }
+
+      .nav-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: var(--amber);
+      }
+
+      .main {
+        padding: 30px;
+        display: grid;
+        gap: 18px;
+        align-content: start;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 18px;
+        padding-bottom: 8px;
+      }
+
+      .topbar h2 {
+        margin: 0;
+        font-size: 32px;
+        line-height: 1.1;
+        letter-spacing: 0;
+      }
+
+      .topbar p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        max-width: 680px;
+        line-height: 1.5;
+      }
+
+      .status-pill {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        height: 34px;
+        padding: 0 12px;
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        background: var(--amber-soft);
+        color: #fbbf24;
+        border-radius: 999px;
+        font-size: 13px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+      }
+
+      .panel {
+        min-height: 660px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .panel-header {
+        padding: 18px 18px 14px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .panel-title {
+        display: grid;
+        gap: 4px;
+      }
+
+      .panel-title h3 {
+        margin: 0;
+        font-size: 15px;
+        letter-spacing: 0;
+      }
+
+      .panel-title span,
+      .count {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .count {
+        min-width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        border-radius: 999px;
+        background: #0a0a0a;
+        border: 1px solid var(--line);
+      }
+
+      .list {
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+        overflow: auto;
+      }
+
+      .card {
+        background: #0d0d0d;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+        min-width: 0;
+        transition:
+          border-color 160ms ease,
+          background 160ms ease,
+          transform 160ms ease;
+      }
+
+      .card:hover {
+        border-color: rgba(245, 158, 11, 0.65);
+        background: #121212;
+        transform: translateY(-1px);
+      }
+
+      .card-title {
+        font-size: 14px;
+        font-weight: 650;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+      }
+
+      .card-meta {
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .card-link {
+        width: fit-content;
+        color: var(--amber);
+        font-size: 12px;
+      }
+
+      .ask-body {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .conversation {
+        flex: 1;
+        padding: 14px;
+        display: grid;
+        gap: 12px;
+        align-content: start;
+        overflow: auto;
+      }
+
+      .message {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        background: #0d0d0d;
+        line-height: 1.55;
+        font-size: 14px;
+      }
+
+      .message.user {
+        border-color: rgba(245, 158, 11, 0.4);
+        background: var(--amber-soft);
+      }
+
+      .message-label {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .action-list {
+        margin: 10px 0 0;
+        padding-left: 18px;
+      }
+
+      .composer {
+        border-top: 1px solid var(--line);
+        padding: 12px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        background: #0d0d0d;
+      }
+
+      .composer input {
+        width: 100%;
+        min-width: 0;
+        height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #080808;
+        color: var(--text);
+        padding: 0 13px;
+        outline: none;
+      }
+
+      .composer input:focus {
+        border-color: rgba(245, 158, 11, 0.75);
+      }
+
+      .composer button {
+        height: 42px;
+        border: 0;
+        border-radius: 8px;
+        background: var(--amber);
+        color: #120a00;
+        padding: 0 16px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .composer button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .empty,
+      .error {
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0d0d0d;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .error {
+        color: var(--danger);
+        border-color: rgba(251, 113, 133, 0.35);
+      }
+
+      @media (max-width: 1180px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .panel {
+          min-height: 420px;
+        }
+      }
+
+      @media (max-width: 760px) {
+        .app {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          position: static;
+          height: auto;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .nav {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .nav a {
+          justify-content: center;
+          padding: 0 8px;
+        }
+
+        .nav-dot {
+          display: none;
+        }
+
+        .main {
+          padding: 20px;
+        }
+
+        .topbar {
+          display: grid;
+        }
+
+        .topbar h2 {
+          font-size: 26px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">R</div>
+          <h1>Reef</h1>
+          <p>Chennai tech community tracker powered by Coral, Notion, GitHub, and Groq.</p>
+        </div>
+        <nav class="nav" aria-label="Panels">
+          <a href="#events"><span class="nav-dot"></span>Events</a>
+          <a href="#repos"><span class="nav-dot"></span>Repos</a>
+          <a href="#ask"><span class="nav-dot"></span>Ask</a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <section class="topbar">
+          <div>
+            <h2>Community signal, one screen.</h2>
+            <p>
+              Reef connects Notion event pages with active GitHub work so the agent can suggest
+              useful follow-ups for the Coral-bean demo.
+            </p>
+          </div>
+          <div class="status-pill" id="apiStatus">Connecting to API</div>
+        </section>
+
+        <section class="grid" aria-label="Reef dashboard panels">
+          <article class="panel" id="events">
+            <header class="panel-header">
+              <div class="panel-title">
+                <h3>Events</h3>
+                <span>Notion Event Vault</span>
+              </div>
+              <span class="count" id="eventCount">0</span>
+            </header>
+            <div class="list" id="eventsList">
+              <div class="empty">Loading events...</div>
+            </div>
+          </article>
+
+          <article class="panel" id="repos">
+            <header class="panel-header">
+              <div class="panel-title">
+                <h3>Repos</h3>
+                <span>codingwithmaajid only</span>
+              </div>
+              <span class="count" id="repoCount">0</span>
+            </header>
+            <div class="list" id="reposList">
+              <div class="empty">Loading repositories...</div>
+            </div>
+          </article>
+
+          <article class="panel" id="ask">
+            <header class="panel-header">
+              <div class="panel-title">
+                <h3>Ask the Agent</h3>
+                <span>Groq over Coral context</span>
+              </div>
+              <span class="count">AI</span>
+            </header>
+            <div class="ask-body">
+              <div class="conversation" id="conversation">
+                <div class="message">
+                  <span class="message-label">Reef</span>
+                  Ask which event maps to which repo, what to demo, or what follow-up to take next.
+                </div>
+              </div>
+              <form class="composer" id="askForm">
+                <input
+                  id="questionInput"
+                  name="question"
+                  autocomplete="off"
+                  value="Which GitHub repo best connects to the Kotlin Buildathon event?"
+                  aria-label="Ask Reef"
+                />
+                <button type="submit" id="askButton">Ask</button>
+              </form>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const API_BASE =
+        window.location.port === "5173" ? "http://127.0.0.1:8000" : window.location.origin;
+
+      const apiStatus = document.querySelector("#apiStatus");
+      const eventsList = document.querySelector("#eventsList");
+      const reposList = document.querySelector("#reposList");
+      const eventCount = document.querySelector("#eventCount");
+      const repoCount = document.querySelector("#repoCount");
+      const conversation = document.querySelector("#conversation");
+      const askForm = document.querySelector("#askForm");
+      const questionInput = document.querySelector("#questionInput");
+      const askButton = document.querySelector("#askButton");
+
+      function formatDate(value) {
+        if (!value) return "No date";
+        return new Intl.DateTimeFormat("en-IN", {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(new Date(value));
+      }
+
+      function createCard({ title, meta, href }) {
+        const card = document.createElement("article");
+        card.className = "card";
+
+        const heading = document.createElement("div");
+        heading.className = "card-title";
+        heading.textContent = title;
+        card.append(heading);
+
+        const details = document.createElement("div");
+        details.className = "card-meta";
+        details.textContent = meta;
+        card.append(details);
+
+        if (href) {
+          const link = document.createElement("a");
+          link.className = "card-link";
+          link.href = href;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.textContent = "Open source";
+          card.append(link);
+        }
+
+        return card;
+      }
+
+      function renderEvents(events) {
+        eventCount.textContent = events.length;
+        eventsList.replaceChildren();
+
+        if (!events.length) {
+          eventsList.innerHTML = '<div class="empty">No events returned from Coral.</div>';
+          return;
+        }
+
+        events.forEach((event, index) => {
+          eventsList.append(
+            createCard({
+              title: event.url || `Event ${index + 1}`,
+              meta: `Last edited ${formatDate(event.last_edited_time)}`,
+              href: event.url,
+            }),
+          );
+        });
+      }
+
+      function renderRepos(repos) {
+        repoCount.textContent = repos.length;
+        reposList.replaceChildren();
+
+        if (!repos.length) {
+          reposList.innerHTML = '<div class="empty">No repositories returned from Coral.</div>';
+          return;
+        }
+
+        repos.forEach((repo) => {
+          reposList.append(
+            createCard({
+              title: repo.name || repo.full_name || "Untitled repo",
+              meta: `${repo.description || "No description"} · Updated ${formatDate(repo.updated_at)}`,
+              href: repo.full_name ? `https://github.com/${repo.full_name}` : null,
+            }),
+          );
+        });
+      }
+
+      function addMessage(label, body, isUser = false, actions = []) {
+        const message = document.createElement("div");
+        message.className = isUser ? "message user" : "message";
+
+        const messageLabel = document.createElement("span");
+        messageLabel.className = "message-label";
+        messageLabel.textContent = label;
+        message.append(messageLabel, document.createTextNode(body));
+
+        if (actions.length) {
+          const list = document.createElement("ul");
+          list.className = "action-list";
+          actions.forEach((action) => {
+            const item = document.createElement("li");
+            item.textContent = action;
+            list.append(item);
+          });
+          message.append(list);
+        }
+
+        conversation.append(message);
+        conversation.scrollTop = conversation.scrollHeight;
+      }
+
+      function showError(target, message) {
+        target.innerHTML = "";
+        const error = document.createElement("div");
+        error.className = "error";
+        error.textContent = message;
+        target.append(error);
+      }
+
+      async function loadOverview() {
+        try {
+          const response = await fetch(`${API_BASE}/overview`);
+          if (!response.ok) throw new Error(await response.text());
+
+          const data = await response.json();
+          renderEvents(data.events || []);
+          renderRepos(data.repos || []);
+          apiStatus.textContent = "Connected";
+        } catch (error) {
+          apiStatus.textContent = "API unavailable";
+          showError(eventsList, "Could not load Notion events. Start the FastAPI server and check Coral access.");
+          showError(reposList, "Could not load GitHub repositories. Start the FastAPI server and check Coral access.");
+        }
+      }
+
+      askForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const question = questionInput.value.trim();
+        if (!question) return;
+
+        addMessage("You", question, true);
+        askButton.disabled = true;
+        askButton.textContent = "Asking";
+
+        try {
+          const response = await fetch(`${API_BASE}/ask`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question }),
+          });
+
+          if (!response.ok) throw new Error(await response.text());
+
+          const data = await response.json();
+          addMessage("Reef", data.answer || "No answer returned.", false, data.suggested_actions || []);
+        } catch (error) {
+          addMessage("Reef", "The agent request failed. Check the API logs and required environment variables.");
+        } finally {
+          askButton.disabled = false;
+          askButton.textContent = "Ask";
+        }
+      });
+
+      loadOverview();
+    </script>
+  </body>
+</html>
