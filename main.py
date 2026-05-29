@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,16 +30,15 @@ def load_env_file(path: str = ".env") -> None:
 load_env_file()
 
 
-EVENT_PAGE_IDS = (
-    "333f1a0a-27c9-8157-9dfa-f95cc19a51aa",
-    "337f1a0a-27c9-81b5-b68d-f242e62d1882",
-    "337f1a0a-27c9-81ec-ad79-fd657dd10e16",
-)
+VAULT_PARENT_PAGE_ID = "333f1a0a-27c9-81c8-9ca5-f2823b3f99fc"
+VAULT_CACHE_SECONDS = 60
 
-EVENTS_QUERY = " UNION ALL ".join(
-    f"SELECT id, url, last_edited_time FROM notion.pages WHERE page_id = '{page_id}'"
-    for page_id in EVENT_PAGE_IDS
-)
+VAULT_CHILDREN_QUERY = f"""
+SELECT id, type, raw
+FROM notion.block_children
+WHERE block_id = '{VAULT_PARENT_PAGE_ID}'
+LIMIT 100
+""".strip()
 
 REPOS_QUERY = """
 SELECT name, updated_at, description, full_name
@@ -48,8 +48,9 @@ LIMIT 50
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
 INDEX_HTML = Path(__file__).with_name("index.html")
+vault_cache: dict[str, Any] = {"expires_at": 0.0, "pages": []}
 
-app = FastAPI(title="Reef API")
+app = FastAPI(title="Reef: Notion MCP Writer powered by Coral SQL")
 
 app.add_middleware(
     CORSMiddleware,
@@ -90,16 +91,32 @@ def run_coral_query(sql: str) -> list[dict[str, Any]]:
 
 
 class AskRequest(BaseModel):
+    page_id: str = Field(min_length=1, max_length=80)
     question: str = Field(min_length=1, max_length=1200)
 
 
+class AgentAction(BaseModel):
+    action: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentResult(BaseModel):
+    action: str
+    status: str
+    summary: str
+    page_url: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class AskResponse(BaseModel):
-    answer: str
-    suggested_actions: list[str]
+    message: str
+    actions: list[AgentAction]
+    results: list[AgentResult] = Field(default_factory=list)
 
 
 class FollowupRequest(BaseModel):
-    event_page_id: str = Field(min_length=1, max_length=80)
+    page_id: str | None = Field(default=None, max_length=80)
+    event_page_id: str | None = Field(default=None, max_length=80)
     question: str = Field(min_length=1, max_length=1200)
 
 
@@ -107,40 +124,330 @@ def sql_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
-def event_content_query(event_page_id: str) -> str:
+def parse_json_value(value: Any, fallback: Any = None) -> Any:
+    if value is None:
+        return fallback
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return fallback
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return fallback
+
+
+def plain_text_from_rich_text(value: Any) -> str:
+    rich_text = parse_json_value(value, [])
+    if not isinstance(rich_text, list):
+        return ""
+    return "".join(
+        str(part.get("plain_text") or part.get("text", {}).get("content") or "")
+        for part in rich_text
+        if isinstance(part, dict)
+    ).strip()
+
+
+def title_from_url(url: str | None, fallback: str = "Untitled Event") -> str:
+    if not url:
+        return fallback
+    slug = url.rstrip("/").split("/")[-1]
+    title = slug
+    if "-" in slug:
+        title = "-".join(slug.split("-")[:-1]) or slug
+    return title.replace("-", " ").strip() or fallback
+
+
+def page_metadata_query(page_id: str) -> str:
     return f"""
-SELECT type, rich_text, raw
-FROM notion.block_children
-WHERE block_id = '{sql_literal(event_page_id)}'
+SELECT id, url, last_edited_time, properties
+FROM notion.pages
+WHERE page_id = '{sql_literal(page_id)}'
+LIMIT 1
 """.strip()
 
 
-def build_system_prompt(event_rows: list[dict[str, Any]], repo_rows: list[dict[str, Any]]) -> str:
+def event_content_query(page_id: str) -> str:
+    return f"""
+SELECT id, type, rich_text, raw
+FROM notion.block_children
+WHERE block_id = '{sql_literal(page_id)}'
+LIMIT 100
+""".strip()
+
+
+def notion_text(text: str) -> dict[str, Any]:
+    return {
+        "type": "text",
+        "text": {"content": text[:1800]},
+    }
+
+
+def build_vault_page(row: dict[str, Any]) -> dict[str, Any] | None:
+    if row.get("type") != "child_page":
+        return None
+
+    raw = parse_json_value(row.get("raw"), {})
+    if not isinstance(raw, dict):
+        return None
+
+    page_id = str(row.get("id") or raw.get("id") or "").strip()
+    if not page_id:
+        return None
+
+    title = str(raw.get("child_page", {}).get("title") or "Untitled Event").strip()
+    last_edited_time = raw.get("last_edited_time")
+    url = f"https://www.notion.so/{page_id.replace('-', '')}"
+
+    try:
+        metadata_rows = run_coral_query(page_metadata_query(page_id))
+    except HTTPException:
+        metadata_rows = []
+
+    if metadata_rows:
+        metadata = metadata_rows[0]
+        url = str(metadata.get("url") or url)
+        last_edited_time = metadata.get("last_edited_time") or last_edited_time
+        if title == "Untitled Event":
+            title = title_from_url(url, title)
+
+    return {
+        "id": page_id,
+        "title": title,
+        "url": url,
+        "last_edited_time": last_edited_time,
+    }
+
+
+def discover_vault_pages(force: bool = False) -> list[dict[str, Any]]:
+    now = time.time()
+    if not force and vault_cache["pages"] and now < float(vault_cache["expires_at"]):
+        return list(vault_cache["pages"])
+
+    rows = run_coral_query(VAULT_CHILDREN_QUERY)
+    pages = [
+        page
+        for row in rows
+        if (page := build_vault_page(row)) is not None
+    ]
+
+    vault_cache["pages"] = pages
+    vault_cache["expires_at"] = now + VAULT_CACHE_SECONDS
+    return list(pages)
+
+
+def vault_page_by_id(page_id: str) -> dict[str, Any] | None:
+    for page in discover_vault_pages():
+        if page["id"] == page_id:
+            return page
+    return None
+
+
+def structure_event_blocks(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    blocks: list[dict[str, Any]] = []
+    checklist_items: list[dict[str, Any]] = []
+    text_blocks: list[str] = []
+
+    for row in rows:
+        raw = parse_json_value(row.get("raw"), {})
+        block_type = str(row.get("type") or "")
+        text = plain_text_from_rich_text(row.get("rich_text"))
+
+        if not text and isinstance(raw, dict) and block_type in raw:
+            block_payload = raw.get(block_type) or {}
+            if isinstance(block_payload, dict):
+                text = plain_text_from_rich_text(block_payload.get("rich_text"))
+
+        block = {
+            "id": row.get("id"),
+            "type": block_type,
+            "text": text,
+        }
+
+        if block_type == "to_do":
+            checked = False
+            if isinstance(raw, dict):
+                checked = bool(raw.get("to_do", {}).get("checked"))
+            block["checked"] = checked
+            checklist_items.append(block)
+        elif text:
+            text_blocks.append(text)
+
+        blocks.append(block)
+
+    return blocks, checklist_items, text_blocks
+
+
+def get_event_detail(page_id: str) -> dict[str, Any]:
+    metadata_rows = run_coral_query(page_metadata_query(page_id))
+    metadata = metadata_rows[0] if metadata_rows else {}
+    vault_page = vault_page_by_id(page_id) or {}
+    block_rows = run_coral_query(event_content_query(page_id))
+    blocks, checklist_items, text_blocks = structure_event_blocks(block_rows)
+    url = str(metadata.get("url") or vault_page.get("url") or f"https://www.notion.so/{page_id.replace('-', '')}")
+
+    return {
+        "id": page_id,
+        "title": str(vault_page.get("title") or title_from_url(url)),
+        "url": url,
+        "last_edited_time": metadata.get("last_edited_time") or vault_page.get("last_edited_time"),
+        "properties": parse_json_value(metadata.get("properties"), {}),
+        "blocks": blocks,
+        "text_blocks": text_blocks,
+        "checklist_items": checklist_items,
+        "queries": {
+            "metadata": page_metadata_query(page_id),
+            "blocks": event_content_query(page_id),
+        },
+    }
+
+
+async def append_blocks_to_notion(page_id: str, children: list[dict[str, Any]]) -> None:
+    notion_key = os.getenv("NOTION_API_KEY")
+    if not notion_key:
+        raise HTTPException(status_code=500, detail="NOTION_API_KEY is not set")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.patch(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers={
+                "Authorization": f"Bearer {notion_key}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            json={"children": children},
+        )
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "Failed to write to Notion",
+                "status": response.status_code,
+                "details": response.text,
+            },
+        )
+
+
+async def create_notion_page(title: str, content: str, parent_page_id: str | None = None) -> dict[str, str]:
+    notion_key = os.getenv("NOTION_API_KEY")
+    if not notion_key:
+        raise HTTPException(status_code=500, detail="NOTION_API_KEY is not set")
+
+    parent_id = parent_page_id or os.getenv("NOTION_PARENT_PAGE_ID") or VAULT_PARENT_PAGE_ID
+    children = content_to_notion_blocks(content)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            "https://api.notion.com/v1/pages",
+            headers={
+                "Authorization": f"Bearer {notion_key}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            json={
+                "parent": {"page_id": parent_id},
+                "properties": {
+                    "title": {
+                        "title": [
+                            {
+                                "type": "text",
+                                "text": {"content": title[:200] or "Untitled Reef Page"},
+                            }
+                        ]
+                    }
+                },
+                "children": children,
+            },
+        )
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "Failed to create Notion page",
+                "status": response.status_code,
+                "details": response.text,
+            },
+        )
+
+    payload = response.json()
+    return {
+        "page_id": payload.get("id", ""),
+        "page_url": payload.get("url", ""),
+    }
+
+
+def content_to_notion_blocks(content: str) -> list[dict[str, Any]]:
+    paragraphs = [line.strip() for line in content.splitlines() if line.strip()]
+    if not paragraphs:
+        paragraphs = ["Created by Reef from Coral SQL context."]
+
+    return [
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [notion_text(paragraph)]},
+        }
+        for paragraph in paragraphs[:20]
+    ]
+
+
+def get_notion_page_url(page_id: str) -> str:
+    rows = run_coral_query(
+        f"SELECT url FROM notion.pages WHERE page_id = '{sql_literal(page_id)}'"
+    )
+    if rows and rows[0].get("url"):
+        return str(rows[0]["url"])
+    return f"https://www.notion.so/{page_id.replace('-', '')}"
+
+
+def build_system_prompt(event_detail: dict[str, Any], repo_rows: list[dict[str, Any]]) -> str:
     context = {
         "coral_sql_queries": {
-            "events": EVENTS_QUERY,
+            "vault": VAULT_CHILDREN_QUERY,
+            "active_event_metadata": event_detail.get("queries", {}).get("metadata"),
+            "active_event_blocks": event_detail.get("queries", {}).get("blocks"),
             "repos": REPOS_QUERY,
         },
         "coral_data": {
-            "events": event_rows,
+            "active_event": event_detail,
             "repos": repo_rows,
         },
     }
 
     return (
-        "You are Reef, a personal Chennai tech community tracker for the Pirates "
-        "of the Coral-bean hackathon. You help connect the user's Notion Event "
-        "Vault with their GitHub repositories. Use only the provided Coral context "
-        "for event and repository facts. The raw Coral SQL queries are included "
-        "alongside the data so you understand how the context was fetched.\n\n"
+        "You are Reef: the Notion MCP Writer powered by Coral SQL. Reef reads "
+        "the user's connected workspace with Coral SQL, reasons with Groq, then "
+        "returns structured actions for the backend to execute. The Notion Event "
+        "Vault is the source of truth. Do not use public event discovery, Google "
+        "data, or website scraping.\n\n"
+        "You are an agent planner, not a chatbot. When the user requests a Notion "
+        "write, return actions. Do not merely suggest actions.\n\n"
+        f"Active Notion page ID: {event_detail.get('id')}.\n"
+        "Supported actions:\n"
+        "1. create_notion_page: payload {\"title\": string, \"content\": string, "
+        "\"parent_page_id\": optional string}\n"
+        "2. write_followup_checklist: payload {\"page_id\": string, "
+        "\"question\": string}\n"
+        "3. no_op: payload {\"reason\": string}\n\n"
+        "Core commands: Create a page for this event; Write a follow-up checklist; "
+        "Turn this repo into a Notion project page; Summarize my Event Vault; Link "
+        "this GitHub repo to this Notion event.\n\n"
+        "For write_followup_checklist, always use the active Notion page ID as page_id. "
         "Return only valid JSON with this shape: "
-        '{"answer":"concise answer","suggested_actions":["action 1","action 2"]}. '
-        "Keep suggested_actions practical and demo-friendly.\n\n"
+        '{"message":"brief status","actions":[{"action":"create_notion_page",'
+        '"payload":{"title":"...","content":"..."}}]}. '
+        "Use no_op only when the user is asking a question and no write is needed.\n\n"
         f"Coral context:\n{json.dumps(context, indent=2)}"
     )
 
 
-def ask_groq(question: str, event_rows: list[dict[str, Any]], repo_rows: list[dict[str, Any]]) -> AskResponse:
+def plan_actions_with_groq(
+    question: str,
+    event_detail: dict[str, Any],
+    repo_rows: list[dict[str, Any]],
+) -> AskResponse:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="GROQ_API_KEY is not set")
@@ -151,7 +458,7 @@ def ask_groq(question: str, event_rows: list[dict[str, Any]], repo_rows: list[di
         completion = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": build_system_prompt(event_rows, repo_rows)},
+                {"role": "system", "content": build_system_prompt(event_detail, repo_rows)},
                 {"role": "user", "content": question},
             ],
             temperature=0.25,
@@ -169,7 +476,104 @@ def ask_groq(question: str, event_rows: list[dict[str, Any]], repo_rows: list[di
         payload = json.loads(content)
         return AskResponse.model_validate(payload)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail="Groq returned invalid structured JSON") from exc
+        raise HTTPException(status_code=502, detail="Groq returned invalid action JSON") from exc
+
+
+async def execute_agent_action(action: AgentAction) -> AgentResult:
+    if action.action == "create_notion_page":
+        title = str(action.payload.get("title") or "Untitled Reef Page").strip()
+        content = str(action.payload.get("content") or "").strip()
+        parent_page_id = action.payload.get("parent_page_id")
+        if parent_page_id is not None:
+            parent_page_id = str(parent_page_id).strip()
+
+        if not action.payload.get("title") or not content:
+            return AgentResult(
+                action=action.action,
+                status="failed",
+                summary="Missing title or content for create_notion_page action.",
+                payload=action.payload,
+            )
+
+        page = await create_notion_page(title, content, parent_page_id or None)
+        return AgentResult(
+            action=action.action,
+            status="success",
+            summary=f"Created Notion page: {title}",
+            page_url=page.get("page_url") or None,
+            payload={"page_id": page.get("page_id"), "title": title},
+        )
+
+    if action.action == "write_followup_checklist":
+        event_page_id = str(action.payload.get("page_id") or action.payload.get("event_page_id") or "").strip()
+        question = str(action.payload.get("question") or "Write a follow-up checklist").strip()
+        if not event_page_id:
+            return AgentResult(
+                action=action.action,
+                status="failed",
+                summary="Missing page_id for checklist action.",
+                payload=action.payload,
+            )
+
+        page_blocks = run_coral_query(event_content_query(event_page_id))
+        tasks = generate_followup_tasks(question, page_blocks)
+        await write_tasks_to_notion(event_page_id, tasks)
+        return AgentResult(
+            action=action.action,
+            status="success",
+            summary=f"Wrote {len(tasks)} checklist tasks to the Notion event page.",
+            page_url=get_notion_page_url(event_page_id),
+            payload={"tasks_written": tasks, "page_id": event_page_id},
+        )
+
+    if action.action == "no_op":
+        return AgentResult(
+            action=action.action,
+            status="skipped",
+            summary=str(action.payload.get("reason") or "No tool execution was needed."),
+            payload=action.payload,
+        )
+
+    return AgentResult(
+        action=action.action,
+        status="unsupported",
+        summary=f"Unsupported action: {action.action}",
+        payload=action.payload,
+    )
+
+
+def write_execution_blocked(action_name: str, question: str) -> bool:
+    normalized = question.lower()
+    global_blockers = ("do not write", "don't write", "just explain", "only explain")
+    if any(blocker in normalized for blocker in global_blockers):
+        return True
+
+    if action_name == "create_notion_page":
+        return any(
+            blocker in normalized
+            for blocker in ("do not create", "don't create", "do not make a page", "don't make a page")
+        )
+
+    if action_name == "write_followup_checklist":
+        return any(
+            blocker in normalized
+            for blocker in ("do not update", "don't update", "do not append", "don't append")
+        )
+
+    return False
+
+
+async def execute_or_skip_agent_action(action: AgentAction, question: str) -> AgentResult:
+    write_actions = {"create_notion_page", "write_followup_checklist"}
+    if action.action in write_actions and write_execution_blocked(action.action, question):
+        return AgentResult(
+            action=action.action,
+            status="skipped",
+            summary="Skipped this write action because the user explicitly blocked it.",
+            payload=action.payload,
+        )
+
+    return await execute_agent_action(action)
 
 
 def generate_followup_tasks(question: str, page_blocks: list[dict[str, Any]]) -> list[str]:
@@ -233,10 +637,6 @@ def generate_followup_tasks(question: str, page_blocks: list[dict[str, Any]]) ->
 
 
 async def write_tasks_to_notion(event_page_id: str, tasks: list[str]) -> None:
-    notion_key = os.getenv("NOTION_API_KEY")
-    if not notion_key:
-        raise HTTPException(status_code=500, detail="NOTION_API_KEY is not set")
-
     children = [
         {
             "object": "block",
@@ -254,33 +654,39 @@ async def write_tasks_to_notion(event_page_id: str, tasks: list[str]) -> None:
         for task in tasks
     ]
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.patch(
-            f"https://api.notion.com/v1/blocks/{event_page_id}/children",
-            headers={
-                "Authorization": f"Bearer {notion_key}",
-                "Notion-Version": "2022-06-28",
-                "Content-Type": "application/json",
-            },
-            json={"children": children},
-        )
+    await append_blocks_to_notion(event_page_id, children)
 
-    if response.status_code >= 400:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "Failed to write tasks to Notion",
-                "status": response.status_code,
-                "details": response.text,
-            },
-        )
+
+@app.on_event("startup")
+def load_vault_on_startup() -> None:
+    try:
+        discover_vault_pages(force=True)
+    except HTTPException as exc:
+        print(f"Reef startup vault discovery failed: {exc.detail}")
+
+
+@app.get("/vault")
+def vault() -> dict[str, Any]:
+    pages = discover_vault_pages()
+    return {
+        "query": VAULT_CHILDREN_QUERY,
+        "cache_seconds": VAULT_CACHE_SECONDS,
+        "cached_until": vault_cache["expires_at"],
+        "pages": pages,
+    }
+
+
+@app.get("/event/{page_id}")
+def event_detail(page_id: str) -> dict[str, Any]:
+    return get_event_detail(page_id)
 
 
 @app.get("/events")
 def events() -> dict[str, Any]:
+    pages = discover_vault_pages()
     return {
-        "query": EVENTS_QUERY,
-        "events": run_coral_query(EVENTS_QUERY),
+        "query": VAULT_CHILDREN_QUERY,
+        "events": pages,
     }
 
 
@@ -294,7 +700,7 @@ def repos() -> dict[str, Any]:
 
 @app.get("/overview")
 def overview() -> dict[str, Any]:
-    event_rows = run_coral_query(EVENTS_QUERY)
+    event_rows = discover_vault_pages()
     repo_rows = run_coral_query(REPOS_QUERY)
 
     return {
@@ -305,27 +711,42 @@ def overview() -> dict[str, Any]:
             "repo_count": len(repo_rows),
         },
         "queries": {
-            "events": EVENTS_QUERY,
+            "events": VAULT_CHILDREN_QUERY,
             "repos": REPOS_QUERY,
         },
     }
 
 
 @app.post("/ask", response_model=AskResponse)
-def ask(request: AskRequest) -> AskResponse:
-    event_rows = run_coral_query(EVENTS_QUERY)
+async def ask(request: AskRequest) -> AskResponse:
+    event_detail_payload = get_event_detail(request.page_id.strip())
     repo_rows = run_coral_query(REPOS_QUERY)
+    response = plan_actions_with_groq(request.question.strip(), event_detail_payload, repo_rows)
+    response.results = [
+        await execute_or_skip_agent_action(action, request.question)
+        for action in response.actions
+    ]
 
-    return ask_groq(request.question.strip(), event_rows, repo_rows)
+    return response
 
 
 @app.post("/followup")
-async def followup(request: FollowupRequest) -> dict[str, list[str]]:
-    page_blocks = run_coral_query(event_content_query(request.event_page_id))
-    tasks = generate_followup_tasks(request.question.strip(), page_blocks)
-    await write_tasks_to_notion(request.event_page_id, tasks)
+@app.post("/notion/follow-up-checklist")
+async def followup(request: FollowupRequest) -> dict[str, Any]:
+    page_id = (request.page_id or request.event_page_id or "").strip()
+    if not page_id:
+        raise HTTPException(status_code=422, detail="page_id is required")
 
-    return {"tasks_written": tasks}
+    page_blocks = run_coral_query(event_content_query(page_id))
+    tasks = generate_followup_tasks(request.question.strip(), page_blocks)
+    await write_tasks_to_notion(page_id, tasks)
+    page_url = get_notion_page_url(page_id)
+
+    return {
+        "page_url": page_url,
+        "summary": f"Wrote {len(tasks)} follow-up checklist tasks to the Notion event page.",
+        "tasks_written": tasks,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
