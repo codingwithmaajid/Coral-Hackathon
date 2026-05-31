@@ -31,6 +31,7 @@
       body {
         margin: 0;
         min-height: 100vh;
+        padding-bottom: 58px;
         background: var(--bg);
         color: var(--text);
         font-family: "Geist Sans", Arial, sans-serif;
@@ -150,6 +151,11 @@
         cursor: pointer;
       }
 
+      .event-card {
+        display: grid;
+        gap: 8px;
+      }
+
       .event-nav:hover,
       .event-nav.active {
         background: var(--surface);
@@ -181,6 +187,32 @@
         margin-top: 4px;
         color: var(--muted);
         font-size: 12px;
+      }
+
+      .followup-button {
+        width: fit-content;
+        margin-left: 34px;
+        padding: 7px 10px;
+        border: 1px solid rgba(245, 158, 11, 0.42);
+        border-radius: 8px;
+        background: var(--amber-soft);
+        color: var(--amber);
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .followup-button:disabled {
+        cursor: not-allowed;
+        opacity: 0.62;
+      }
+
+      .followup-results {
+        margin: 0 0 0 34px;
+        padding-left: 16px;
+        color: #d4d4d4;
+        font-size: 12px;
+        line-height: 1.45;
       }
 
       .sql-box {
@@ -460,6 +492,39 @@
         color: var(--danger);
       }
 
+      .coral-footer {
+        position: fixed;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 20;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 14px;
+        align-items: center;
+        padding: 10px 18px;
+        border-top: 1px solid rgba(245, 158, 11, 0.25);
+        background: rgba(10, 10, 10, 0.96);
+        backdrop-filter: blur(10px);
+      }
+
+      .coral-footer-label {
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .coral-footer pre {
+        margin: 0;
+        overflow: hidden;
+        color: var(--amber);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size: 11px;
+        line-height: 1.35;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       @media (max-width: 1040px) {
         .app,
         .below {
@@ -469,6 +534,11 @@
         .sidebar {
           position: static;
           height: auto;
+        }
+
+        .coral-footer {
+          grid-template-columns: 1fr;
+          gap: 4px;
         }
       }
 
@@ -576,6 +646,10 @@
         </article>
       </main>
     </div>
+    <footer class="coral-footer">
+      <span class="coral-footer-label">Powered by Coral SQL</span>
+      <pre id="footerSql">Loading Coral SQL...</pre>
+    </footer>
 
     <script>
       const API_BASE =
@@ -591,6 +665,7 @@
 
       const eventNav = document.querySelector("#eventNav");
       const sqlPreview = document.querySelector("#sqlPreview");
+      const footerSql = document.querySelector("#footerSql");
       const apiStatus = document.querySelector("#apiStatus");
       const eventTitle = document.querySelector("#eventTitle");
       const eventSubtitle = document.querySelector("#eventSubtitle");
@@ -615,7 +690,11 @@
       function eventName(url) {
         try {
           const slug = new URL(url).pathname.split("/").filter(Boolean).at(-1) || "Untitled Event";
-          return slug.replace(/[a-f0-9]{32}$/i, "").replace(/-+$/g, "").replace(/-/g, " ");
+          return slug
+            .replace(/[a-f0-9]{32}$/i, "")
+            .replace(/-+$/g, "")
+            .replace(/-/g, " ")
+            .trim();
         } catch {
           return "Untitled Event";
         }
@@ -631,12 +710,15 @@
       }
 
       function displayTitle(event) {
-        return event?.title || eventName(event?.url || "");
+        return eventName(event?.url || "") || event?.title || "Untitled Event";
       }
 
-      function renderEventNav() {
+      function renderEvents() {
         eventNav.replaceChildren();
         state.events.forEach((event) => {
+          const card = document.createElement("div");
+          card.className = "event-card";
+
           const button = document.createElement("button");
           button.className = `event-nav ${state.activeEvent?.id === event.id ? "active" : ""}`;
           button.type = "button";
@@ -648,8 +730,75 @@
             </span>
           `;
           button.addEventListener("click", () => selectEvent(event));
-          eventNav.append(button);
+
+          const followupButton = document.createElement("button");
+          followupButton.className = "followup-button";
+          followupButton.type = "button";
+          followupButton.textContent = "Generate Follow-ups";
+          followupButton.addEventListener("click", () => generateFollowups(event, followupButton, results));
+
+          const results = document.createElement("ul");
+          results.className = "followup-results";
+          results.hidden = true;
+
+          card.append(button, followupButton, results);
+          eventNav.append(card);
         });
+      }
+
+      function renderEventNav() {
+        renderEvents();
+      }
+
+      async function generateFollowups(event, button, results) {
+        button.disabled = true;
+        button.textContent = "Writing...";
+        results.hidden = true;
+        results.replaceChildren();
+
+        try {
+          const response = await fetch(`${API_BASE}/followup`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              page_id: event.id,
+              question: "What should I do after this event?",
+            }),
+          });
+          if (!response.ok) throw new Error(await response.text());
+          const data = await response.json();
+          const writtenTasks = data.tasks_written || [];
+          if (!writtenTasks.length) {
+            const item = document.createElement("li");
+            item.textContent = "No tasks were returned.";
+            results.append(item);
+          }
+          writtenTasks.forEach((task) => {
+            const item = document.createElement("li");
+            item.textContent = task;
+            results.append(item);
+          });
+          results.hidden = false;
+          if (state.activeEvent?.id === event.id) {
+            const detailResponse = await fetch(`${API_BASE}/event/${event.id}`);
+            if (detailResponse.ok) {
+              const detail = await detailResponse.json();
+              state.activeDetail = detail;
+              eventEdited.textContent = formatDate(detail.last_edited_time);
+              renderBlocks();
+              renderTasks();
+            }
+          }
+        } catch (error) {
+          const item = document.createElement("li");
+          item.textContent = "Could not write follow-ups. Check backend logs.";
+          item.className = "error";
+          results.append(item);
+          results.hidden = false;
+        } finally {
+          button.disabled = false;
+          button.textContent = "Generate Follow-ups";
+        }
       }
 
       function relatedRepos() {
@@ -740,6 +889,7 @@
           const response = await fetch(`${API_BASE}/event/${event.id}`);
           if (!response.ok) throw new Error(await response.text());
           const detail = await response.json();
+          eventSubtitle.classList.remove("error");
           state.activeDetail = detail;
           eventTitle.textContent = detail.title || displayTitle(event);
           eventSubtitle.innerHTML = `Active Notion page read through Coral SQL. <a href="${detail.url}" target="_blank" rel="noreferrer">Open in Notion</a>`;
@@ -771,18 +921,23 @@
 
       async function loadApp() {
         try {
-          const [vaultResponse, repoResponse] = await Promise.all([
-            fetch(`${API_BASE}/vault`),
-            fetch(`${API_BASE}/repos`),
-          ]);
+          const vaultResponse = await fetch(`${API_BASE}/vault`);
           if (!vaultResponse.ok) throw new Error(await vaultResponse.text());
-          if (!repoResponse.ok) throw new Error(await repoResponse.text());
           const vaultData = await vaultResponse.json();
-          const repoData = await repoResponse.json();
+          let repoData = { repos: [], query: "" };
+          try {
+            const repoResponse = await fetch(`${API_BASE}/repos`);
+            if (repoResponse.ok) {
+              repoData = await repoResponse.json();
+            }
+          } catch {
+            repoData = { repos: [], query: "" };
+          }
           state.events = vaultData.pages || [];
           state.repos = repoData.repos || [];
           state.queries = { vault: vaultData.query || "", repos: repoData.query || "" };
           sqlPreview.textContent = `${state.queries.vault || ""}\n\n${state.queries.repos || ""}`;
+          footerSql.textContent = `${state.queries.vault || ""}  |  ${state.queries.repos || ""}`;
           apiStatus.textContent = "Live Coral SQL";
           if (state.events.length) {
             await selectEvent(state.events[0]);

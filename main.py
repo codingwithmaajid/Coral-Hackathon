@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -158,6 +159,11 @@ def title_from_url(url: str | None, fallback: str = "Untitled Event") -> str:
     return title.replace("-", " ").strip() or fallback
 
 
+def notion_url_for_page(page_id: str, title: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-") or "Untitled"
+    return f"https://www.notion.so/{slug}-{page_id.replace('-', '')}"
+
+
 def page_metadata_query(page_id: str) -> str:
     return f"""
 SELECT id, url, last_edited_time, properties
@@ -197,24 +203,11 @@ def build_vault_page(row: dict[str, Any]) -> dict[str, Any] | None:
 
     title = str(raw.get("child_page", {}).get("title") or "Untitled Event").strip()
     last_edited_time = raw.get("last_edited_time")
-    url = f"https://www.notion.so/{page_id.replace('-', '')}"
-
-    try:
-        metadata_rows = run_coral_query(page_metadata_query(page_id))
-    except HTTPException:
-        metadata_rows = []
-
-    if metadata_rows:
-        metadata = metadata_rows[0]
-        url = str(metadata.get("url") or url)
-        last_edited_time = metadata.get("last_edited_time") or last_edited_time
-        if title == "Untitled Event":
-            title = title_from_url(url, title)
 
     return {
         "id": page_id,
         "title": title,
-        "url": url,
+        "url": notion_url_for_page(page_id, title),
         "last_edited_time": last_edited_time,
     }
 
@@ -673,6 +666,16 @@ def vault() -> dict[str, Any]:
         "cache_seconds": VAULT_CACHE_SECONDS,
         "cached_until": vault_cache["expires_at"],
         "pages": pages,
+    }
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "groq_key_loaded": bool(os.getenv("GROQ_API_KEY")),
+        "notion_key_loaded": bool(os.getenv("NOTION_API_KEY")),
+        "vault_cache_size": len(vault_cache["pages"]),
     }
 
 
